@@ -12,6 +12,21 @@ sed -i 's/192.168.1.1/172.16.1.1/g' package/base-files/files/bin/config_generate
 #sed -i "s/hostname='.*'/hostname='OpenWrt'/g" package/base-files/files/bin/config_generate
 
 # ============================================
+# NoWiFi: 禁用 ath11k 和 mac80211 NSS 补丁
+# ============================================
+# 删除 ath11k 相关包
+rm -rf package/kernel/ath11k*
+
+# 删除 mac80211 的 NSS 补丁（避免编译失败）
+rm -rf package/kernel/mac80211/patches/nss
+
+# 删除无线相关包
+rm -rf package/kernel/ath
+rm -rf package/firmware/ath11k-firmware
+
+echo "WiFi packages and NSS patches removed for NoWiFi build"
+
+# ============================================
 # NSS q6_region 内存调整（无 WiFi 版本）
 # ============================================
 # 默认值: 55MB (0x3700000)
