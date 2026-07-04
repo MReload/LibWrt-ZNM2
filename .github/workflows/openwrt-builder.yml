@@ -125,7 +125,7 @@ jobs:
       if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: ${{ steps.compile.outputs.release_tag }}
+        tag_name: ${{ steps.tag.outputs.release_tag }}
         body: |
           ## OpenWrt 固件 - 兆能 M2 (NoWiFi)
 
