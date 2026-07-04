@@ -1,36 +1,22 @@
 #
-# https://github.com/P3TERX/Actions-OpenWrt
-#
-# File: .github/workflows/openwrt-builder.yml
-# Description: Build OpenWrt using GitHub Actions
-#
-
-# License: MIT
+# Build OpenWrt for ZN M2 (IPQ60XX) NoWiFi
+# Based on P3TERX/Actions-OpenWrt
 #
 
 name: Build OpenWrt
 
 on:
-  repository_dispatch:
   workflow_dispatch:
-    inputs:
-      ssh:
-        description: 'SSH connection to Actions'
-        required: false
-        default: 'false'
 
 permissions:
   contents: write
-  actions: write
 
 env:
   REPO_URL: https://github.com/LiBwrt/LibWrt.git
   REPO_BRANCH: main-nss
-  FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
@@ -38,17 +24,22 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
-    - name: Initialization environment
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        df -h
+
+    - name: Install dependencies
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
           bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
@@ -56,133 +47,103 @@ jobs:
           libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz \
           mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils \
           rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
 
     - name: Clone source code
-      working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
+        echo "COMMIT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
 
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
+        [ -e $GITHUB_WORKSPACE/feeds.conf.default ] && mv $GITHUB_WORKSPACE/feeds.conf.default $OPENWRT_PATH/feeds.conf.default
+        chmod +x $GITHUB_WORKSPACE/$DIY_P1_SH
+        cd $OPENWRT_PATH
         $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
+      run: cd $OPENWRT_PATH && ./scripts/feeds update -a
 
     - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      run: cd $OPENWRT_PATH && ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
+        [ -e $GITHUB_WORKSPACE/files ] && mv $GITHUB_WORKSPACE/files $OPENWRT_PATH/files
+        [ -e $GITHUB_WORKSPACE/$CONFIG_FILE ] && cp $GITHUB_WORKSPACE/$CONFIG_FILE $OPENWRT_PATH/.config
+        chmod +x $GITHUB_WORKSPACE/$DIY_P2_SH
+        cd $OPENWRT_PATH
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: SSH connection to Actions
-      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
-      uses: P3TERX/ssh2actions@v1.0.0
+    - name: Generate config
+      run: cd $OPENWRT_PATH && make defconfig
+
+    - name: Cache OpenWrt build
+      uses: actions/cache@v4
       with:
-        TEG_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        path: |
+          ${{ env.OPENWRT_PATH }}/ccache
+          ${{ env.OPENWRT_PATH }}/staging_dir
+          ${{ env.OPENWRT_PATH }}/build_dir
+        key: openwrt-${{ env.COMMIT_HASH }}
+        restore-keys: openwrt-
 
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j$(nproc)
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+    - name: Download packages
+      run: cd $OPENWRT_PATH && make download -j$(nproc)
 
-    - name: Compile the firmware
+    - name: Compile firmware
       id: compile
       run: |
-        cd openwrt
+        cd $OPENWRT_PATH
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.FILE_DATE }}
-        path: openwrt/bin
 
     - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success'
       run: |
-        cd openwrt/bin/targets/*/*
+        cd $OPENWRT_PATH/bin/targets/*/*
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DATE=$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+    - name: Upload firmware
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success'
+      uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_firmware${{ env.FILE_DATE }}
+        name: OpenWrt_ZN_M2_${{ env.DATE }}
         path: ${{ env.FIRMWARE }}
 
     - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "## 固件信息" >> release.txt
-        echo "- 设备: 兆能 M2 (IPQ60XX)" >> release.txt
-        echo "- 源码: $REPO_URL" >> release.txt
-        echo "- 分支: $REPO_BRANCH" >> release.txt
-        echo "- 内核: 6.12" >> release.txt
-        echo "- NSS: 已启用 (v12.5)" >> release.txt
-        echo "- WiFi: 无 WiFi 版本" >> release.txt
-        echo "" >> release.txt
-        echo "## NoWiFi 优化" >> release.txt
-        echo "- q6_region 内存: 16MB (释放更多系统内存)" >> release.txt
-        echo "- 已禁用 ath11k 驱动和固件" >> release.txt
-        echo "" >> release.txt
-        echo "## 默认配置" >> release.txt
-        echo "- IP: 172.16.1.1" >> release.txt
-        echo "- 密码: 无" >> release.txt
-        echo "status=success" >> $GITHUB_OUTPUT
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
+      run: echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
 
-    - name: Upload firmware to release
+    - name: Create release
+      if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success'
       uses: softprops/action-gh-release@v2
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
+        tag_name: ${{ steps.compile.outputs.release_tag }}
+        body: |
+          ## OpenWrt 固件 - 兆能 M2 (NoWiFi)
+
+          | 项目 | 内容 |
+          |------|------|
+          | 设备 | 兆能 M2 (IPQ60XX) |
+          | 源码 | LiBwrt/LibWrt |
+          | 分支 | main-nss |
+          | 内核 | 6.12 |
+          | NSS | v12.5 |
+          | WiFi | 无 |
+          | IP | 172.16.1.1 |
+          | 密码 | 无 |
         files: ${{ env.FIRMWARE }}/*
 
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
-
-    - name: Remove old Releases
+    - name: Clean old releases
+      if: env.UPLOAD_RELEASE == 'true'
       uses: dev-drprasad/delete-older-releases@v0.3.4
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
         keep_latest: 3
         delete_tags: true
